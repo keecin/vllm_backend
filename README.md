@@ -204,6 +204,41 @@ In the [samples](samples) folder, you can also find a sample client,
 [asyncio gRPC client library](https://github.com/triton-inference-server/client#python-asyncio-support-beta-1)
 to run inference on Triton.
 
+### Multimodal Inputs
+
+The backend accepts optional `image` and `audio` inputs in addition to
+`text_input`. Both are `TYPE_STRING` tensors with `dims: [-1]`, where each
+element is a base64-encoded media file (for audio: WAV/FLAC/OGG/MP3, decoded
+with `soundfile` when available, falling back to the stdlib `wave` module for
+WAV). Audio is passed to vLLM as `(samples, sample_rate)` and is resampled by
+vLLM to the rate expected by the model.
+
+As with any vLLM multimodal model, `text_input` must contain one placeholder
+per media item. For example, for Qwen3-ASR the prompt (after applying the
+model's chat template) must contain
+`<|audio_start|><|audio_pad|><|audio_end|>` for each audio:
+
+```python
+import base64
+import requests
+
+audio_b64 = base64.b64encode(open("test1.wav", "rb").read()).decode()
+prompt = (
+    "<|im_start|>system\n<|im_end|>\n"
+    "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+response = requests.post(
+    "http://localhost:8000/v2/models/vllm_model/generate",
+    json={
+        "text_input": prompt,
+        "audio": [audio_b64],
+        "parameters": {"stream": False, "temperature": 0},
+    },
+)
+print(response.json()["text_output"])
+```
+
 ### Running the Latest vLLM Version
 
 You can check the vLLM version included in Triton Inference Server from

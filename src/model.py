@@ -77,6 +77,12 @@ class TritonPythonModel:
                 "optional": True,
             },
             {
+                "name": "audio",
+                "data_type": "TYPE_STRING",
+                "dims": [-1],  # can be multiple base64-encoded audios
+                "optional": True,
+            },
+            {
                 "name": "stream",
                 "data_type": "TYPE_BOOL",
                 "dims": [1],

@@ -26,6 +26,7 @@
 
 import base64
 import json
+import wave
 from abc import abstractmethod
 from io import BytesIO
 from typing import Callable, Dict, List, Optional
@@ -45,6 +46,46 @@ from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from utils.vllm_backend_utils import TritonSamplingParams
+
+
+def _decode_audio(audio_b64: str) -> tuple[np.ndarray, int]:
+    """Decode a base64-encoded audio blob into (float32 mono samples, sample rate).
+
+    Uses soundfile when available (supports wav/flac/ogg/mp3/...), and falls
+    back to the stdlib ``wave`` module for plain WAV input.
+    """
+    raw = base64.b64decode(audio_b64)
+
+    audio: np.ndarray
+    sample_rate: int
+    try:
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(BytesIO(raw), dtype="float32", always_2d=False)
+        sample_rate = int(sample_rate)
+    except Exception:
+        with wave.open(BytesIO(raw), "rb") as wav:
+            sample_rate = wav.getframerate()
+            num_channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            frames = wav.readframes(wav.getnframes())
+
+        if sample_width == 1:
+            audio = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+        elif sample_width == 2:
+            audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sample_width == 4:
+            audio = np.frombuffer(frames, dtype=np.int32).astype(np.float32) / 2147483648.0
+        else:
+            raise ValueError(f"Unsupported WAV sample width: {sample_width} bytes")
+
+        if num_channels > 1:
+            audio = audio.reshape(-1, num_channels)
+
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    return np.ascontiguousarray(audio, dtype=np.float32), sample_rate
 
 
 class RequestBase:
@@ -100,6 +141,8 @@ class GenerateRequest(RequestBase):
             prompt = prompt.decode("utf-8")
         prompt = {"prompt": prompt}
 
+        multi_modal_data = {}
+
         # image
         images = pb_utils.get_input_tensor_by_name(self.triton_request, "image")
         if images:
@@ -109,7 +152,23 @@ class GenerateRequest(RequestBase):
                 image_rgb = Image.open(BytesIO(image_b)).convert("RGB")
                 images_vllm.append(image_rgb)
             if len(images_vllm) > 0:
-                prompt["multi_modal_data"] = {"image": images_vllm}
+                multi_modal_data["image"] = images_vllm
+
+        # audio
+        audios = pb_utils.get_input_tensor_by_name(self.triton_request, "audio")
+        if audios:
+            audios_vllm = []
+            for audio_np in audios.as_numpy():
+                audio_b64 = audio_np.decode("utf-8") if isinstance(audio_np, bytes) else audio_np
+                if not audio_b64:
+                    continue
+                audio_arr, sample_rate = _decode_audio(audio_b64)
+                audios_vllm.append((audio_arr, sample_rate))
+            if len(audios_vllm) > 0:
+                multi_modal_data["audio"] = audios_vllm
+
+        if multi_modal_data:
+            prompt["multi_modal_data"] = multi_modal_data
 
         # stream
         stream = pb_utils.get_input_tensor_by_name(self.triton_request, "stream")
